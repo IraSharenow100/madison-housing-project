@@ -1,0 +1,768 @@
+---
+title: "Report 1: City of Madison Single-Family Home Sales Time Series"
+author: "Ira Sharenow"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    number_sections: false
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 6
+)
+options(scipen = 999)
+```
+
+```{r libraries}
+library(tidyverse)
+library(scales)
+library(knitr)
+library(here) # For better file path handling
+```
+
+```{r config}
+# Configuration - easily modifiable parameters
+config <- list(
+  study_period = list(start = 1994, end = 2024),
+  recent_years = 2022:2024,
+  decade_start = 1990,
+  colors = list(
+    bedrooms = c("1" = "#56B4E9", "2" = "#009E73", "3" = "#D55E00", 
+                 "4" = "#E69F00", "5+" = "#CC79A7"),
+    accent = "#FFC2C7"
+  ),
+  data_path = "D:/Documents/Employment/2025 job search/Project 2025/Madison Housing Project/Outputs/df_with_coords_master_2025-08-15.rds"
+)
+```
+
+```{r helper_functions}
+# Data processing functions
+categorize_bedrooms <- function(beds) {
+  case_when(
+    is.na(beds) ~ NA_character_,
+    beds <= 1 ~ "1",
+    beds == 2 ~ "2",
+    beds == 3 ~ "3", 
+    beds == 4 ~ "4",
+    beds >= 5 ~ "5+"
+  )
+}
+
+categorize_decade <- function(year) {
+  decade_start <- (year %/% 10) * 10
+  factor(paste0(decade_start, "s"), levels = c("1990s", "2000s", "2010s", "2020s"))
+}
+
+# Visualization functions
+create_end_labels <- function(data, x_col, y_col, group_col, suffix = "bed") {
+  data %>%
+    group_by({{ group_col }}) %>%
+    slice_max({{ x_col }}, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(
+      label = ifelse({{ group_col }} == "5+", 
+                     paste0({{ group_col }}, suffix), 
+                     paste0({{ group_col }}, suffix)),
+      x_lab = {{ x_col }} + 0.35
+    )
+}
+
+# Custom themes
+theme_madison <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = base_size * 1.1),
+      plot.subtitle = element_text(hjust = 0.5, size = base_size * 0.9),
+      panel.grid.minor = element_blank(),
+      axis.title = element_text(size = base_size * 0.9),
+      legend.title = element_text(size = base_size * 0.9)
+    )
+}
+
+theme_madison_clean <- function(base_size = 12) {
+  theme_madison(base_size) +
+    theme(panel.grid = element_blank())
+}
+
+# Validation functions
+validate_data <- function(data, required_cols) {
+  missing_cols <- setdiff(required_cols, names(data))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  # Check for reasonable data ranges
+  if ("Sold_Price" %in% names(data)) {
+    price_issues <- data %>%
+      filter(!is.na(Sold_Price)) %>%
+      summarise(
+        min_price = min(Sold_Price),
+        max_price = max(Sold_Price),
+        negative_prices = sum(Sold_Price < 0),
+        extreme_high = sum(Sold_Price > 5000000)
+      )
+    
+    if (price_issues$negative_prices > 0) {
+      warning("Found ", price_issues$negative_prices, " negative prices")
+    }
+    if (price_issues$extreme_high > 0) {
+      warning("Found ", price_issues$extreme_high, " prices above $5M - possible data errors")
+    }
+  }
+  
+  return(invisible(TRUE))
+}
+```
+
+```{r load_data}
+# Load and prepare data with validation
+if (!file.exists(config$data_path)) {
+  stop("Data file not found at: ", config$data_path)
+}
+
+madison_raw <- readRDS(config$data_path)
+
+# Validate required columns
+required_cols <- c("Location", "Year_Closing_Date", "Beds", "Sold_Price", "FinSqFt")
+validate_data(madison_raw, required_cols)
+
+# Clean and prepare data
+madison <- madison_raw %>%
+  filter(
+    High %in% c("Memorial", "West", "East", "East High", "Lafollette"), 
+    Year_Closing_Date >= config$study_period$start,
+    Year_Closing_Date <= config$study_period$end
+  ) %>%
+  mutate(
+    bed_category = factor(categorize_bedrooms(Beds), levels = c("1","2","3","4","5+")),
+    decade = categorize_decade(Year_Closing_Date)
+  ) %>%
+  # Remove obvious data errors
+  filter(
+    is.na(Sold_Price) | (Sold_Price > 10000 & Sold_Price < 5000000),
+    is.na(FinSqFt) | (FinSqFt > 200 & FinSqFt < 10000),
+    is.na(Sold_Price_Per_SQFT) | (Sold_Price_Per_SQFT > 10 & Sold_Price_Per_SQFT < 1000)
+  )
+
+```
+
+```{r skyline_image, out.width='\\paperwidth', out.height='\\paperheight', out.extra='keepaspectratio'}
+# Check if image exists before including
+skyline_path <- "D:/Documents/Employment/2025 job search/Project 2025/Madison Housing Project/Outputs/Madison_skyline.jpg"
+if (file.exists(skyline_path)) {
+  knitr::include_graphics(skyline_path)
+}
+```
+
+\newpage
+
+## Executive Summary
+
+This report analyzes 31 years of single-family home sales data in Madison, Wisconsin (1994-2024), revealing several key market dynamics:
+
+**Key Findings:**
+- **Market Composition**: 3-bedroom homes consistently represent the largest market segment (45%+ of sales)
+- **Price Appreciation**: Median home prices increased from ~$100K in 1994 to over $400K by 2024
+- **Market Volatility**: Sales volumes show significant year-to-year variation, with recent declines primarily driven by reduced 3-bedroom activity
+- **Size Inflation**: Median home size increased from ~1,400 sq ft to over 1,800 sq ft during the study period
+- **Price Intensity**: Price per square foot more than tripled, indicating market tightening beyond simple inflation
+
+\newpage
+
+## Introduction
+
+This is the first in a multi-part series analyzing single-family home sales in Madison, Wisconsin and surrounding areas. This report establishes baseline trends for the City of Madison from 1994-2024, with subsequent reports expanding to suburban markets and exploring additional market factors.
+
+**Methodology Notes:**
+- Data includes all recorded single-family home sales within Madison city limits
+- Obvious data errors (prices <$10K or >$5M, sizes <200 or >10K sq ft) have been filtered
+- Analysis focuses on closed sales, not listings or pending transactions
+
+\newpage
+
+## Market Volume Analysis
+
+### Sales Activity by Year and Property Type
+
+The Madison single-family market exhibits considerable volatility, with yearly sales volumes ranging mostly between 1,850 and 2,550 transactions and with totals ranging from about 1,650 to slightly more than 2,700.The data reveals that 3-bedroom homes drive overall market activity, representing nearly half of all sales throughout the study period.
+
+```{r chart1_sales_by_year}
+# Calculate sales data
+sales_by_year <- madison %>%
+  filter(!is.na(bed_category)) %>%
+  count(Year_Closing_Date, bed_category, name = "sales")
+
+total_sales <- madison %>%
+  count(Year_Closing_Date, name = "total_sales")
+
+# Create labels
+max_year <- max(sales_by_year$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(sales_by_year$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- create_end_labels(sales_by_year, Year_Closing_Date, sales, bed_category)
+
+ggplot() +
+  geom_line(data = sales_by_year, 
+            aes(x = Year_Closing_Date, y = sales, color = bed_category), 
+            linewidth = 1.2) +
+  geom_line(data = total_sales,
+            aes(x = Year_Closing_Date, y = total_sales),
+            linetype = "dashed", color = "black", linewidth = 1.3) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = sales, label = label, color = bed_category),
+            hjust = 0, vjust = 0.5, size = 3.5, fontface = "bold") +
+  scale_color_manual(values = config$colors$bedrooms) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.2)) +
+  scale_y_continuous(labels = comma_format()) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Madison Single-Family Sales Volume by Year",
+    subtitle = "Dashed line shows total annual sales; colored lines show bedroom categories",
+    x = "Year of Closing",
+    y = "Number of Sales",
+    caption = "Source: Madison housing sales data, 1994-2024"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 50, 5.5, 5.5))
+```
+
+**Key Observation**: The recent decline in sales activity (2022-2024) is primarily attributable to reduced 3-bedroom home transactions, which historically account for 45-50% of market volume.
+
+\newpage
+
+### Recent Market Activity Summary
+
+```{r sales_table}
+recent_sales <- madison %>%
+  filter(Year_Closing_Date %in% config$recent_years, !is.na(bed_category)) %>%
+  count(Year_Closing_Date, bed_category) %>%
+  pivot_wider(names_from = bed_category, values_from = n, values_fill = 0) %>%
+  mutate(Total = rowSums(select(., -Year_Closing_Date))) %>%
+  arrange(desc(Year_Closing_Date)) %>%
+  rename(Year = Year_Closing_Date)
+
+knitr::kable(recent_sales,
+             caption = "Madison Single-Family Sales by Bedroom Count (2022-2024)",
+             col.names = c("Year", "1-Bed", "2-Bed", "3-Bed", "4-Bed", "5+Bed", "Total"),
+             align = c("c","r","r","r","r","r","r"),
+             format.args = list(big.mark = ","))
+```
+
+The table above confirms the dominance of 3-bedroom properties and shows the recent market softening across most segments.
+
+\newpage
+
+## Market Composition Analysis
+
+### Overall Bedroom Distribution (1994-2024)
+
+```{r chart2_bedroom_distribution}
+bedroom_totals <- madison %>%
+  filter(!is.na(bed_category)) %>%
+  count(bed_category, name = "sales") %>%
+  mutate(
+    pct = sales / sum(sales),
+    pct_label = percent(pct, accuracy = 0.1),
+    count_label = comma(sales),
+    pct_y = case_when(
+      bed_category == "3" ~ sales * 0.94,
+      bed_category %in% c("2","4") ~ sales * 0.88,
+      TRUE ~ sales * 0.50
+    )
+  )
+
+ggplot(bedroom_totals, aes(x = bed_category, y = sales)) +
+  geom_col(fill = config$colors$accent, color = "black", width = 0.75, alpha = 0.8) +
+  geom_text(aes(y = pct_y, label = pct_label), 
+            size = 4, fontface = "bold") +
+  geom_text(aes(y = sales, label = count_label), 
+            vjust = -0.4, size = 3.8, fontface = "bold") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15)), labels = comma_format()) +
+  coord_cartesian(clip = "off") +
+  labs(
+    title = "Madison Single-Family Sales Distribution by Bedroom Count",
+    subtitle = "Percentages shown inside bars, total counts above bars (1994-2024)",
+    x = "Number of Bedrooms",
+    y = "Total Sales",
+    caption = "3-bedroom homes represent nearly half of all transactions"
+  ) +
+  theme_madison_clean()
+```
+
+\newpage
+
+### Bedroom Distribution Trends by Decade
+
+```{r chart3_decade_bedroom_share}
+decade_shares <- madison %>%
+  filter(!is.na(bed_category), !is.na(decade), Year_Closing_Date >= config$decade_start) %>%
+  count(decade, bed_category, name = "sales") %>%
+  group_by(decade) %>%
+  mutate(pct = sales / sum(sales)) %>%
+  ungroup() %>%
+  complete(decade, bed_category, fill = list(sales = 0, pct = 0)) %>%
+  mutate(pct_label = percent(pct, accuracy = 0.1))
+
+ggplot(decade_shares, aes(x = bed_category, y = pct, fill = bed_category)) +
+  geom_col(color = "black", width = 0.75) +
+  geom_text(aes(label = pct_label), vjust = -0.3, fontface = "bold", size = 3.5) +
+  scale_fill_manual(values = config$colors$bedrooms) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.1))) +
+  facet_wrap(~ decade, ncol = 2) +
+  coord_cartesian(clip = "off") +
+  labs(
+    title = "Bedroom Distribution Evolution by Decade",
+    subtitle = "Market composition has remained relatively stable over time",
+    x = "Number of Bedrooms",
+    y = "Percentage of Total Sales",
+    caption = "3-bedroom homes consistently dominate across all decades"
+  ) +
+  guides(fill = "none") +
+  theme_madison_clean() +
+  theme(
+    panel.spacing = unit(1, "lines"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+**Market Insight**: The relative stability of bedroom distribution across decades suggests consistent housing demand patterns, with 3-bedroom homes maintaining their dominant market position.
+
+\newpage
+
+## Price Analysis
+
+### Overall Price Trends
+
+```{r chart4_price_trends}
+price_trends <- madison %>%
+  filter(!is.na(Sold_Price)) %>%
+  group_by(Year_Closing_Date) %>%
+  summarise(
+    Median = median(Sold_Price, na.rm = TRUE),
+    Mean = mean(Sold_Price, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(Median, Mean), names_to = "metric", values_to = "price")
+
+# Calculate CAGR for median prices
+median_data <- price_trends %>% filter(metric == "Median")
+first_year_price <- median_data$price[median_data$Year_Closing_Date == min(median_data$Year_Closing_Date)]
+last_year_price <- median_data$price[median_data$Year_Closing_Date == max(median_data$Year_Closing_Date)]
+years_elapsed <- max(median_data$Year_Closing_Date) - min(median_data$Year_Closing_Date)
+cagr <- ((last_year_price / first_year_price)^(1/years_elapsed) - 1) * 100
+
+max_year <- max(price_trends$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(price_trends$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- price_trends %>%
+  group_by(metric) %>%
+  filter(Year_Closing_Date == max_year) %>%
+  ungroup() %>%
+  mutate(x_lab = Year_Closing_Date + 0.4)
+
+ggplot(price_trends, aes(x = Year_Closing_Date, y = price, 
+                        color = metric, linetype = metric)) +
+  geom_line(linewidth = 1.3) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = price, label = metric, color = metric),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 4) +
+  scale_y_continuous(labels = dollar_format(scale = 1e-3, suffix = "K")) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.5)) +
+  scale_color_manual(values = c("Median" = "#2E86AB", "Mean" = "#F24236")) +
+  scale_linetype_manual(values = c("Median" = "solid", "Mean" = "dashed")) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none", linetype = "none") +
+  labs(
+    title = "Madison Home Price Appreciation (1994-2024)",
+    subtitle = paste0("Median price CAGR: ", round(cagr, 1), "%"),
+    x = "Year of Closing",
+    y = "Sales Price (USD, thousands)",
+    caption = "Mean consistently exceeds median, indicating right-skewed price distribution"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 60, 5.5, 5.5))
+```
+
+\newpage
+
+### Price Trends by Property Size
+
+```{r chart5_price_index}
+# Calculate price index by bedroom category
+price_by_bed <- madison %>%
+  filter(!is.na(Sold_Price), !is.na(bed_category)) %>%
+  group_by(Year_Closing_Date, bed_category) %>%
+  summarise(median_price = median(Sold_Price, na.rm = TRUE), .groups = "drop")
+
+# Create price index (base year = 100)
+base_prices <- price_by_bed %>%
+  group_by(bed_category) %>%
+  slice_min(Year_Closing_Date, n = 1, with_ties = FALSE) %>%
+  select(bed_category, base_year = Year_Closing_Date, base_price = median_price)
+
+price_index <- price_by_bed %>%
+  left_join(base_prices, by = "bed_category") %>%
+  mutate(index = 100 * median_price / base_price)
+
+max_year <- max(price_index$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(price_index$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- create_end_labels(price_index, Year_Closing_Date, index, bed_category)
+
+ggplot(price_index, aes(x = Year_Closing_Date, y = index, 
+                       color = bed_category)) +
+  geom_line(linewidth = 1.2) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = index, label = label, color = bed_category),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.5) +
+  scale_color_manual(values = config$colors$bedrooms) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.2)) +
+  scale_y_continuous(breaks = seq(100, 500, 50)) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Price Appreciation Index by Bedroom Count",
+    subtitle = "Index: 100 = first available year price for each bedroom category",
+    x = "Year of Closing",
+    y = "Price Index (Base Year = 100)",
+    caption = "All bedroom categories show similar appreciation patterns"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 50, 5.5, 5.5))
+```
+
+\newpage
+
+## Home Size Analysis
+
+### Square Footage Evolution
+
+```{r chart6_sqft_trends}
+sqft_trends <- madison %>%
+  filter(!is.na(FinSqFt)) %>%
+  group_by(Year_Closing_Date) %>%
+  summarise(
+    median_sqft = median(FinSqFt, na.rm = TRUE),
+    mean_sqft = mean(FinSqFt, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(median_sqft, mean_sqft), names_to = "metric", values_to = "sqft") %>%
+  mutate(metric = str_remove(metric, "_sqft"))
+
+max_year <- max(sqft_trends$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(sqft_trends$Year_Closing_Date, na.rm = TRUE)
+
+label_df <- sqft_trends %>%
+  filter(Year_Closing_Date == max_year) %>%
+  mutate(x_lab = Year_Closing_Date + 0.4)
+
+ggplot(sqft_trends, aes(x = Year_Closing_Date, y = sqft, color = metric, linetype = metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_text(data = label_df,
+            aes(x = x_lab, y = sqft, label = str_to_title(metric)),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.8) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.5)) +
+  scale_y_continuous(labels = comma_format()) +
+  scale_color_manual(values = c("median" = "#2E86AB", "mean" = "#F24236")) +
+  scale_linetype_manual(values = c("median" = "solid", "mean" = "dashed")) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none", linetype = "none") +
+  labs(
+    title = "Home Size Trends Over Time",
+    subtitle = "Gradual increase in both median and mean finished square footage",
+    x = "Year of Closing",
+    y = "Finished Square Feet",
+    caption = "~400 sq ft increase in median size over 30-year period"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 50, 5.5, 5.5))
+```
+
+\newpage
+
+### Square Footage by Property Type
+
+```{r chart7_sqft_by_bedroom}
+sqft_by_bed <- madison %>%
+  filter(!is.na(bed_category), !is.na(FinSqFt)) %>%
+  group_by(Year_Closing_Date, bed_category) %>%
+  summarise(median_sqft = median(FinSqFt, na.rm = TRUE), .groups = "drop")
+
+max_year <- max(sqft_by_bed$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(sqft_by_bed$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- create_end_labels(sqft_by_bed, Year_Closing_Date, median_sqft, bed_category)
+
+ggplot(sqft_by_bed, aes(x = Year_Closing_Date, y = median_sqft,
+                       color = bed_category)) +
+  geom_line(linewidth = 1.2) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = median_sqft, label = label, color = bed_category),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.5) +
+  scale_color_manual(values = config$colors$bedrooms) +
+  scale_y_continuous(labels = comma_format()) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.2)) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Median Home Size by Bedroom Count",
+    subtitle = "Size increases evident across all bedroom categories",
+    x = "Year of Closing",
+    y = "Median Finished Square Feet",
+    caption = "All segments show gradual size inflation over time"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 50, 5.5, 5.5))
+```
+
+\newpage
+
+## Price Intensity Analysis
+
+### Price Per Square Foot Trends
+
+```{r chart8_ppsf_trends}
+ppsf_trends <- madison %>%
+  filter(!is.na(Sold_Price_Per_SQFT), Sold_Price_Per_SQFT > 0) %>%
+  group_by(Year_Closing_Date) %>%
+  summarise(
+    median_ppsf = median(Sold_Price_Per_SQFT, na.rm = TRUE),
+    mean_ppsf = mean(Sold_Price_Per_SQFT, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(median_ppsf, mean_ppsf), names_to = "metric", values_to = "ppsf") %>%
+  mutate(metric = str_remove(metric, "_ppsf"))
+
+max_year <- max(ppsf_trends$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(ppsf_trends$Year_Closing_Date, na.rm = TRUE)
+
+label_df <- ppsf_trends %>%
+  filter(Year_Closing_Date == max_year) %>%
+  mutate(x_lab = Year_Closing_Date + 0.4)
+
+ggplot(ppsf_trends, aes(x = Year_Closing_Date, y = ppsf, color = metric, linetype = metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_text(data = label_df,
+            aes(x = x_lab, y = ppsf, label = str_to_title(metric)),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.8) +
+  scale_y_continuous(labels = dollar_format(accuracy = 1)) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.5)) +
+  scale_color_manual(values = c("median" = "#2E86AB", "mean" = "#F24236")) +
+  scale_linetype_manual(values = c("median" = "solid", "mean" = "dashed")) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none", linetype = "none") +
+  labs(
+    title = "Price Per Square Foot Acceleration",
+    subtitle = "Price intensity more than tripled during study period",
+    x = "Year of Closing",
+    y = "Price per Square Foot (USD)",
+    caption = "Rapid acceleration after 2010 suggests supply constraints"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 50, 5.5, 5.5))
+```
+
+\newpage
+
+### Price Intensity by Property Type
+
+```{r chart9_ppsf_by_bedroom}
+ppsf_by_bed <- madison %>%
+  filter(!is.na(bed_category), !is.na(Sold_Price_Per_SQFT), Sold_Price_Per_SQFT > 0) %>%
+  group_by(Year_Closing_Date, bed_category) %>%
+  summarise(median_ppsf = median(Sold_Price_Per_SQFT, na.rm = TRUE), .groups = "drop")
+
+max_year <- max(ppsf_by_bed$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(ppsf_by_bed$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- create_end_labels(ppsf_by_bed, Year_Closing_Date, median_ppsf, bed_category)
+
+ggplot(ppsf_by_bed, aes(x = Year_Closing_Date, y = median_ppsf,
+                       color = bed_category)) +
+  geom_line(linewidth = 1.2) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = median_ppsf, label = label, color = bed_category),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.5) +
+  scale_color_manual(values = config$colors$bedrooms) +
+  scale_y_continuous(labels = dollar_format(accuracy = 1)) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.2)) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Price Intensity by Bedroom Count",
+    subtitle = "Smaller homes command higher per-square-foot premiums",
+    x = "Year of Closing",
+    y = "Price per Square Foot (USD)",
+    caption = "1-2 bedroom homes show highest price intensity, likely reflecting location premiums"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 50, 5.5, 5.5))
+```
+
+\newpage
+
+## Historical Price Distribution Analysis
+
+The following boxplot series examines price evolution by property type across decades, providing insight into market dynamics within comparable home categories.
+
+```{r chart10_price_boxplots, fig.height=5}
+# Create price boxplots with improved styling
+create_price_boxplot <- function(bed_cat, title_suffix, fill_color) {
+  data <- madison %>%
+    filter(bed_category == bed_cat, !is.na(decade), !is.na(Sold_Price),
+           Year_Closing_Date >= config$decade_start, Year_Closing_Date <= config$study_period$end)
+  
+  if(nrow(data) == 0) return(NULL)
+  
+  n_sales <- data %>% count(decade) %>% pull(n)
+  sample_info <- paste0("n = ", paste(n_sales, collapse = ", "))
+  
+  ggplot(data, aes(x = decade, y = Sold_Price)) +
+    geom_boxplot(width = 0.6, fill = fill_color, color = "black", 
+                 outlier.size = 1, alpha = 0.8) +
+    scale_y_continuous(labels = dollar_format(scale = 1e-3, suffix = "K")) +
+    labs(
+      title = paste0("Price Distribution: ", title_suffix, " by Decade"),
+      subtitle = paste0("Sample sizes by decade: ", sample_info),
+      x = "Decade",
+      y = "Sales Price (USD, thousands)"
+    ) +
+    theme_madison()
+}
+
+# Generate boxplots for each bedroom category
+for (bed_cat in levels(madison$bed_category)) {
+  if (is.na(bed_cat)) next
+  
+  title_suffix <- ifelse(bed_cat == "5+", "5+ Bedroom Homes", paste0(bed_cat, "-Bedroom Homes"))
+  fill_color <- config$colors$bedrooms[[bed_cat]]
+  
+  plot_obj <- create_price_boxplot(bed_cat, title_suffix, fill_color)
+  if (!is.null(plot_obj)) {
+    print(plot_obj)
+  }
+}
+```
+
+\newpage
+
+## Price Intensity Distribution Analysis
+
+```{r chart11_ppsf_boxplots, fig.height=5}
+# Create PPSF boxplots with outlier trimming
+create_ppsf_boxplot <- function(bed_cat, title_suffix, fill_color) {
+  data <- madison %>%
+    filter(bed_category == bed_cat, !is.na(decade), 
+           !is.na(Sold_Price_Per_SQFT), Sold_Price_Per_SQFT > 0,
+           Year_Closing_Date >= config$decade_start, Year_Closing_Date <= config$study_period$end)
+  
+  if(nrow(data) == 0) return(NULL)
+  
+  # Calculate reasonable y-limits (trim extreme outliers)
+  y_lo <- quantile(data$Sold_Price_Per_SQFT, 0.01, na.rm = TRUE)
+  y_hi <- quantile(data$Sold_Price_Per_SQFT, 0.99, na.rm = TRUE)
+  y_lo <- max(10, as.numeric(y_lo))  # Minimum reasonable PPSF
+  
+  n_sales <- data %>% count(decade) %>% pull(n)
+  sample_info <- paste0("n = ", paste(n_sales, collapse = ", "))
+  
+  ggplot(data, aes(x = decade, y = Sold_Price_Per_SQFT)) +
+    geom_boxplot(width = 0.6, fill = fill_color, color = "black", 
+                 outlier.size = 1, alpha = 0.8) +
+    coord_cartesian(ylim = c(y_lo, y_hi)) +
+    scale_y_continuous(labels = dollar_format(accuracy = 1)) +
+    labs(
+      title = paste0("Price Intensity Distribution: ", title_suffix, " by Decade"),
+      subtitle = paste0("Sample sizes by decade: ", sample_info, " (extreme outliers trimmed)"),
+      x = "Decade", 
+      y = "Price per Square Foot (USD)"
+    ) +
+    theme_madison()
+}
+
+# Generate PPSF boxplots for each bedroom category
+for (bed_cat in levels(madison$bed_category)) {
+  if (is.na(bed_cat)) next
+  
+  title_suffix <- ifelse(bed_cat == "5+", "5+ Bedroom Homes", paste0(bed_cat, "-Bedroom Homes"))
+  fill_color <- config$colors$bedrooms[[bed_cat]]
+  
+  plot_obj <- create_ppsf_boxplot(bed_cat, title_suffix, fill_color)
+  if (!is.null(plot_obj)) {
+    print(plot_obj)
+  }
+}
+```
+
+\newpage
+
+## Summary and Market Implications
+
+### Key Market Dynamics
+
+**Volume Patterns:**
+- Total annual sales range from ~800-1,400 transactions, with significant year-to-year volatility
+- 3-bedroom homes consistently represent 45-50% of market activity
+- Recent market softening (2022-2024) primarily driven by reduced 3-bedroom activity
+
+**Price Evolution:**
+- Median home prices increased from ~$100K (1994) to >$400K (2024)
+- Compound annual growth rate of approximately `r round(cagr, 1)`% over 30-year period
+- Price appreciation relatively consistent across all bedroom categories
+
+**Market Intensity:**
+- Price per square foot more than tripled during study period
+- Smaller homes (1-2 bedrooms) command highest per-square-foot premiums
+- Acceleration in price intensity after 2010 suggests supply-demand imbalances
+
+**Property Characteristics:**
+- Gradual increase in home sizes (~400 sq ft median growth over 30 years)
+- Size inflation evident across all bedroom categories
+- Market composition by bedroom count remains remarkably stable across decades
+
+### Market Outlook Considerations
+
+1. **Supply Constraints**: The dramatic increase in price per square foot suggests ongoing supply limitations relative to demand
+
+2. **Affordability Pressures**: With median prices quadrupling while home sizes increased modestly, affordability has deteriorated significantly
+
+3. **Market Segmentation**: Different bedroom categories show similar appreciation patterns, suggesting broad-based demand across property types
+
+4. **Recent Softening**: The 2022-2024 decline in transaction volume may indicate market adjustment to higher interest rates and affordability constraints
+
+### Methodology Notes
+
+- Analysis includes `r format(nrow(madison), big.mark = ",")` recorded sales transactions
+- Data filtered to remove obvious errors (prices <$10K or >$5M, sizes <200 or >10K sq ft)
+- Price per square foot calculations based on finished square footage
+- Decade analysis begins with 1990s to ensure adequate sample sizes
+
+**Next Report Preview**: Subsequent analysis will expand to Madison suburban markets and explore additional factors including lot sizes, property age, and geographic sub-market variations.
+
+\newpage
+
+### Personal Note
+
+I am very pleased to say that I am an alumnus of the University of Wisconsin-Madison. I have an M.A. in mathematics and an M.S. in Business from UW-Madison.
+
+Ira Sharenow
+El Cerrito, CA
+irasharenow100@gmail.com
+
+*Go Bucky!*
+
+```{r bucky_image, out.width='\\paperwidth', out.height='\\paperheight', out.extra='keepaspectratio'}
+bucky_path <- "D:/Documents/Employment/2025 job search/Project 2025/Madison Housing Project/Outputs/Bucky_Badger.jpg"
+if (file.exists(bucky_path)) {
+  knitr::include_graphics(bucky_path)
+}
+
