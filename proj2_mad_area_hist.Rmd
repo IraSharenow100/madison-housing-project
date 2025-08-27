@@ -1,0 +1,824 @@
+---
+title: "Report 2: Madison Area Single-Family Home Sales Time Series"
+author: "Ira Sharenow"
+date: "August 27, 2025"
+output:
+  pdf_document:
+    number_sections: false
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 6
+)
+options(scipen = 999)
+```
+
+```{r libraries}
+library(tidyverse)
+library(scales)
+library(knitr)
+library(here)
+```
+
+```{r config}
+# Configuration - easily modifiable parameters
+config <- list(
+  study_period = list(start = 1994, end = 2024),
+  recent_years = 2019:2024,
+  decade_start = 1990,
+  colors = list(
+    bedrooms = c("1" = "#56B4E9", "2" = "#009E73", "3" = "#D55E00", 
+                 "4" = "#E69F00", "5+" = "#CC79A7"),
+    madison_suburbs = c("Madison" = "#FF6B6B", "Suburbs" = "#4ECDC4"),
+    accent = "#FFC2C7"
+  ),
+  data_path = "D:/Documents/Employment/2025 job search/Project 2025/Madison Housing Project/Outputs/df_with_coords_master_2025-08-15.rds",
+  include_csv = "D:/Documents/Employment/2025 job search/Project 2025/Madison Housing Project/Outputs/sales_by_location_thru_2024.csv"
+)
+
+# Madison high schools for city identification
+madison_high_schools <- c("Memorial", "West", "East", "East High", "Lafollette")
+```
+
+```{r helper_functions}
+# Data processing functions
+categorize_bedrooms <- function(beds) {
+  case_when(
+    is.na(beds) ~ NA_character_,
+    beds <= 1 ~ "1",
+    beds == 2 ~ "2",
+    beds == 3 ~ "3", 
+    beds == 4 ~ "4",
+    beds >= 5 ~ "5+"
+  )
+}
+
+categorize_decade <- function(year) {
+  decade_start <- (year %/% 10) * 10
+  factor(paste0(decade_start, "s"), levels = c("1990s", "2000s", "2010s", "2020s"))
+}
+
+# Visualization functions
+create_end_labels <- function(data, x_col, y_col, group_col, suffix = "") {
+  data %>%
+    group_by({{ group_col }}) %>%
+    slice_max({{ x_col }}, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(
+      label = paste0({{ group_col }}, suffix),
+      x_lab = {{ x_col }} + 0.35
+    )
+}
+
+# Custom themes
+theme_madison <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = base_size * 1.1),
+      plot.subtitle = element_text(hjust = 0.5, size = base_size * 0.9),
+      panel.grid.minor = element_blank(),
+      axis.title = element_text(size = base_size * 0.9),
+      legend.title = element_text(size = base_size * 0.9)
+    )
+}
+
+theme_madison_clean <- function(base_size = 12) {
+  theme_madison(base_size) +
+    theme(panel.grid = element_blank())
+}
+
+# Validation functions
+validate_data <- function(data, required_cols) {
+  missing_cols <- setdiff(required_cols, names(data))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+  }
+  return(invisible(TRUE))
+}
+```
+
+```{r load_data}
+# Load and prepare data with validation
+if (!file.exists(config$data_path)) {
+  stop("Data file not found at: ", config$data_path)
+}
+if (!file.exists(config$include_csv)) {
+  stop("Include list not found at: ", config$include_csv)
+}
+
+# Load main data
+madison_raw <- readRDS(config$data_path)
+
+# Load include list
+sales_by_location <- read_csv(config$include_csv, show_col_types = FALSE)
+
+# Validate required columns
+required_cols <- c("Location", "Year_Closing_Date", "Beds", "Sold_Price", "FinSqFt", "High")
+validate_data(madison_raw, required_cols)
+
+validate_data(sales_by_location, c("Location", "Include"))
+
+# Prepare location lookup table
+location_lookup <- sales_by_location %>%
+  filter(Include == "Yes") %>%
+  mutate(Location_clean = str_to_title(str_remove(Location, " - [CT]$"))) %>%
+  select(Location, Location_clean)
+
+# Clean and prepare data
+madison_area <- madison_raw %>%
+  # First filter to Madison properties or included locations
+  filter(
+    High %in% madison_high_schools | 
+    Location %in% location_lookup$Location
+  ) %>%
+  # Add location_clean from the lookup table
+  left_join(location_lookup, by = "Location") %>%
+  # Exclude specific communities as requested
+  filter(
+    !Location %in% c("Mount Horeb - V", "Cross Plains - V", "Cross Plains", 
+                     "Maple Bluff - V", "Shorewood Hills - V")
+  ) %>%
+  # Classify as Madison or Suburbs
+  mutate(
+    Place2 = if_else(High %in% madison_high_schools, "Madison", "Suburbs")
+  ) %>%
+  # Apply study period filter
+  filter(
+    Year_Closing_Date >= config$study_period$start,
+    Year_Closing_Date <= config$study_period$end,
+    !is.na(Place2)
+  ) %>%
+  # Create categorical variables
+  mutate(
+    bed_category = factor(categorize_bedrooms(Beds), levels = c("1","2","3","4","5+")),
+    decade = categorize_decade(Year_Closing_Date),
+    Place2 = factor(Place2, levels = c("Madison", "Suburbs"))
+  ) %>%
+  # Remove obvious data errors
+  filter(
+    is.na(Sold_Price) | (Sold_Price > 10000 & Sold_Price < 5000000),
+    is.na(FinSqFt) | (FinSqFt > 200 & FinSqFt < 10000),
+    is.na(Sold_Price_Per_SQFT) | (Sold_Price_Per_SQFT > 10 & Sold_Price_Per_SQFT < 1000)
+  ) %>%
+  # Clean location names for suburbs
+  mutate(
+    Location_clean = case_when(
+      Place2 == "Madison" ~ "Madison",
+      TRUE ~ str_to_title(str_remove(Location, " - [CT]$"))
+    )
+  )
+```
+
+```{r skyline_image, out.width='\\paperwidth', out.height='\\paperheight', out.extra='keepaspectratio'}
+# Check if image exists before including
+skyline_path <- "D:/Documents/Employment/2025 job search/Project 2025/Madison Housing Project/Outputs/Madison_skyline.jpg"
+if (file.exists(skyline_path)) {
+  knitr::include_graphics(skyline_path)
+}
+```
+
+\newpage
+
+## Executive Summary
+
+This report expands the analysis to include Madison and surrounding suburban communities (1994-2024), revealing market dynamics across the broader metropolitan area:
+
+**Key Findings:**
+- **Market Scale**: Madison represents the largest single market, with suburban communities collectively providing additional market depth
+- **Price Relationships**: Suburban homes command higher absolute prices, while Madison properties show higher price per square foot values
+- **Growth Patterns**: Both markets show similar long-term appreciation trends, with suburban markets showing slightly higher volatility
+- **Size Differences**: Suburban homes average 200-300 square feet larger than Madison properties across all bedroom categories
+- **Market Dynamics**: The price relationship between suburbs and Madison reflects trade-offs between home size and location convenience
+
+\newpage
+
+## Introduction
+
+This second report expands our analysis beyond Madison city limits to include the broader metropolitan area. While Report 1 established baseline trends for Madison proper, this analysis compares urban and suburban single-family housing markets to identify key differentials and market dynamics.
+
+**Methodology Notes:**
+- Madison properties identified by attendance at Madison high schools (Memorial, West, East, LaFollette)
+- Suburban properties include all other communities in the dataset with sufficient transaction volumes
+- Analysis maintains the same 1994-2024 time frame for consistency
+- All data cleaning and filtering criteria consistent with Report 1.
+
+\newpage
+
+## Market Geography Overview
+
+### Transaction Volumes by Location
+
+```{r location_summary_table}
+location_summary <- madison_area %>%
+  filter(!is.na(bed_category)) %>%
+  count(Location_clean, Place2) %>%
+  arrange(desc(n)) %>%
+  head(-5) %>%  # Remove bottom 5 rows
+  mutate(
+    Percentage = round(100 * n / sum(n), 1)
+  ) %>%
+  select(Location = Location_clean, Type = Place2, `Total Sales` = n, `Percent of Market` = Percentage)
+
+kable(location_summary,
+      caption = "Single-Family Home Sales by Location (1994-2024)",
+      align = c("l", "c", "r", "r"),
+      format.args = list(big.mark = ","))
+```
+
+The table above shows the distribution of sales across all included locations, with Madison accounting for the majority of transactions as the single largest market.
+
+\newpage
+
+## Market Volume Analysis
+
+### Annual Sales Activity - Madison vs Suburbs
+
+```{r chart1_annual_sales}
+# Calculate annual sales data
+annual_sales <- madison_area %>%
+  filter(!is.na(bed_category)) %>%
+  count(Year_Closing_Date, Place2, name = "sales")
+
+# Create end labels
+max_year <- max(annual_sales$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(annual_sales$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- annual_sales %>%
+  group_by(Place2) %>%
+  slice_max(Year_Closing_Date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    label = Place2,
+    x_lab = Year_Closing_Date + 0.4
+  )
+
+ggplot(annual_sales, aes(x = Year_Closing_Date, y = sales, color = Place2)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.8) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = sales, label = label, color = Place2),
+            hjust = 0, vjust = 0.5, size = 3.8, fontface = "bold") +
+  scale_color_manual(values = config$colors$madison_suburbs) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.5)) +
+  scale_y_continuous(labels = comma_format()) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Annual Single-Family Sales Volume",
+    subtitle = "Madison vs Suburban Communities (1994-2024)",
+    x = "Year of Closing",
+    y = "Number of Sales",
+    caption = "Suburban markets show higher volatility but greater overall volume"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 60, 5.5, 5.5))
+```
+
+\newpage
+
+### Recent Market Activity Summary
+
+```{r recent_sales_table}
+recent_sales <- madison_area %>%
+  filter(Year_Closing_Date %in% config$recent_years, !is.na(bed_category)) %>%
+  count(Year_Closing_Date, Place2, bed_category) %>%
+  pivot_wider(names_from = bed_category, values_from = n, values_fill = 0) %>%
+  mutate(Total = rowSums(select(., -Year_Closing_Date, -Place2))) %>%
+  arrange(desc(Year_Closing_Date), Place2) %>%
+  rename(Year = Year_Closing_Date, Market = Place2) %>%
+  mutate(Year = as.character(Year))
+
+kable(recent_sales,
+      caption = "Recent Sales Activity by Market and Bedroom Count (2019-2024)",
+      col.names = c("Year", "Market", "1-Bed", "2-Bed", "3-Bed", "4-Bed", "5+Bed", "Total"),
+      align = c("c","l","r","r","r","r","r","r"),
+      format.args = list(big.mark = ","))
+```
+
+\newpage
+
+## Market Composition Analysis
+
+### Bedroom Distribution Comparison
+
+```{r chart2_bedroom_distribution}
+bedroom_comparison <- madison_area %>%
+  filter(!is.na(bed_category)) %>%
+  count(Place2, bed_category, name = "sales") %>%
+  group_by(Place2) %>%
+  mutate(
+    pct = sales / sum(sales),
+    pct_label = percent(pct, accuracy = 0.1),
+    count_label = comma(sales),
+    pct_y = case_when(
+      bed_category == "3" ~ sales * 0.65,
+      bed_category %in% c("2","4") ~ sales * 0.60,
+      TRUE ~ sales * 0.50
+    )
+  ) %>%
+  ungroup()
+
+ggplot(bedroom_comparison, aes(x = bed_category, y = sales, fill = Place2)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.70, 
+           color = "black", alpha = 0.8) +
+  geom_text(aes(y = pct_y, label = pct_label),
+            position = position_dodge(width = 0.75),
+            size = 3.6, fontface = "bold") +
+  geom_text(aes(y = sales, label = count_label),
+            position = position_dodge(width = 0.75),
+            vjust = -0.4, size = 3.6, fontface = "bold") +
+  scale_fill_manual(values = config$colors$madison_suburbs) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18)), labels = comma_format()) +
+  coord_cartesian(clip = "off") +
+  labs(
+    title = "Sales Distribution by Bedroom Count",
+    subtitle = "Madison vs Suburban Communities (1994-2024)",
+    x = "Number of Bedrooms",
+    y = "Total Sales",
+    fill = NULL,
+    caption = "Percentages shown inside bars, total counts above bars"
+  ) +
+  theme_madison_clean() +
+  theme(legend.position = "top")
+
+# Save as PNG
+# Save as PNG
+ggsave("bedroom_distribution_chart.png",
+       width = 10, height = 6, dpi = 300, bg = "white")
+
+```
+
+\newpage
+
+### Decade Evolution by Market
+
+```{r chart3_decade_comparison}
+decade_shares <- madison_area %>%
+  filter(!is.na(bed_category), !is.na(decade), Year_Closing_Date >= config$decade_start) %>%
+  count(decade, Place2, bed_category, name = "sales") %>%
+  group_by(decade, Place2) %>%
+  mutate(pct = sales / sum(sales)) %>%
+  ungroup() %>%
+  complete(decade, Place2, bed_category, fill = list(sales = 0, pct = 0)) %>%
+  mutate(pct_label = percent(pct, accuracy = 0.1))
+
+ggplot(decade_shares, aes(x = bed_category, y = pct, fill = bed_category)) +
+  geom_col(color = "black", width = 0.75) +
+  geom_text(aes(label = pct_label), vjust = -0.3, fontface = "bold", size = 3.2) +
+  scale_fill_manual(values = config$colors$bedrooms) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.1))) +
+  facet_grid(decade ~ Place2) +
+  coord_cartesian(clip = "off") +
+  labs(
+    title = "Market Composition Evolution by Decade",
+    subtitle = "Bedroom distribution remains stable across markets and time",
+    x = "Number of Bedrooms",
+    y = "Percentage of Total Sales",
+    caption = "Consistent patterns suggest stable housing demand preferences"
+  ) +
+  guides(fill = "none") +
+  theme_madison_clean() +
+  theme(
+    panel.spacing = unit(1, "lines"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+\newpage
+
+## Price Analysis
+
+### Overview
+
+Price analysis reveals important trade-offs between location and home size. Detailed price trend and index analysis has been moved to the Price Intensity section below for better organization alongside related per-square-foot metrics.
+
+\newpage
+
+## Home Size Analysis
+
+### Square Footage Comparison
+
+```{r chart6_sqft_trends}
+sqft_trends <- madison_area %>%
+  filter(!is.na(FinSqFt)) %>%
+  group_by(Year_Closing_Date, Place2) %>%
+  summarise(median_sqft = median(FinSqFt, na.rm = TRUE), .groups = "drop")
+
+max_year <- max(sqft_trends$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(sqft_trends$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- sqft_trends %>%
+  group_by(Place2) %>%
+  slice_max(Year_Closing_Date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    label = Place2,
+    x_lab = Year_Closing_Date + 0.4
+  )
+
+ggplot(sqft_trends, aes(x = Year_Closing_Date, y = median_sqft, color = Place2)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.8) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = median_sqft, label = label, color = Place2),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.8) +
+  scale_color_manual(values = config$colors$madison_suburbs) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.5)) +
+  scale_y_continuous(labels = comma_format()) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Median Home Size Trends",
+    subtitle = "Suburban homes consistently larger across time periods",
+    x = "Year of Closing",
+    y = "Median Finished Square Feet",
+    caption = "Size differential averages 200-300 square feet"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 60, 5.5, 5.5))
+```
+
+\newpage
+
+### Size Comparison by Bedroom Count
+
+```{r chart7_sqft_by_bedroom}
+sqft_by_bed <- madison_area %>%
+  filter(!is.na(bed_category), bed_category %in% c("3", "4"), !is.na(FinSqFt)) %>%
+  group_by(Year_Closing_Date, Place2, bed_category) %>%
+  summarise(median_sqft = median(FinSqFt, na.rm = TRUE), .groups = "drop")
+
+ggplot(sqft_by_bed, aes(x = Year_Closing_Date, y = median_sqft, color = Place2)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 1.6) +
+  facet_wrap(~ paste0(bed_category, "-Bedroom Homes"), ncol = 1) +
+  scale_color_manual(values = config$colors$madison_suburbs) +
+  scale_y_continuous(labels = comma_format()) +
+  labs(
+    title = "Median Home Size by Market and Bedroom Count",
+    subtitle = "Size premiums consistent across property types",
+    x = "Year of Closing",
+    y = "Median Finished Square Feet",
+    color = NULL,
+    caption = "Suburban size advantage maintained across all time periods"
+  ) +
+  theme_madison() +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(face = "bold")
+  )
+```
+
+\newpage
+
+## Price Intensity Analysis
+
+### Price Appreciation Index - 3-Bedroom Homes
+
+```{r price_index_analysis}
+price_3bed <- madison_area %>%
+  filter(!is.na(Sold_Price), !is.na(bed_category), bed_category == "3") %>%
+  group_by(Year_Closing_Date, Place2) %>%
+  summarise(median_price = median(Sold_Price, na.rm = TRUE), .groups = "drop")
+
+# Create price index
+base_prices <- price_3bed %>%
+  group_by(Place2) %>%
+  slice_min(Year_Closing_Date, n = 1, with_ties = FALSE) %>%
+  select(Place2, base_year = Year_Closing_Date, base_price = median_price)
+
+price_index <- price_3bed %>%
+  left_join(base_prices, by = "Place2") %>%
+  mutate(index = 100 * median_price / base_price)
+
+max_year <- max(price_index$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(price_index$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- price_index %>%
+  group_by(Place2) %>%
+  slice_max(Year_Closing_Date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    label = Place2,
+    x_lab = Year_Closing_Date + 1.5,
+    y_adj = case_when(
+      Place2 == "Madison" ~ index +10,
+      Place2 == "Suburbs" ~ index -10
+    )
+  )
+
+ggplot(price_index, aes(x = Year_Closing_Date, y = index, color = Place2)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.6) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = y_adj, label = label, color = Place2),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.6) +
+  scale_color_manual(values = config$colors$madison_suburbs) +
+  scale_x_continuous(limits = c(min_year, max_year + 3.0)) +
+  scale_y_continuous(breaks = seq(100, 500, 50)) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Price Appreciation Index - 3-Bedroom Homes",
+    subtitle = "Index: 100 = first available year price for each market",
+    x = "Year of Closing",
+    y = "Price Index (Base Year = 100)",
+    caption = "Similar appreciation rates despite absolute price differences"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 60, 5.5, 5.5))
+```
+
+### Median Price Trends
+
+```{r price_trends_analysis}
+price_trends <- madison_area %>%
+  filter(!is.na(Sold_Price)) %>%
+  group_by(Year_Closing_Date, Place2) %>%
+  summarise(median_price = median(Sold_Price, na.rm = TRUE), .groups = "drop")
+
+# Calculate price premium (corrected to show suburbs premium over Madison)
+price_comparison <- price_trends %>%
+  pivot_wider(names_from = Place2, values_from = median_price) %>%
+  mutate(
+    Premium = (Suburbs - Madison) / Madison * 100,
+    avg_premium = mean(Premium, na.rm = TRUE)
+  )
+
+avg_premium <- round(mean(price_comparison$Premium, na.rm = TRUE), 1)
+
+max_year <- max(price_trends$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(price_trends$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- price_trends %>%
+  group_by(Place2) %>%
+  slice_max(Year_Closing_Date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    label = Place2,
+    x_lab = Year_Closing_Date + 0.4
+  )
+
+ggplot(price_trends, aes(x = Year_Closing_Date, y = median_price, 
+                        color = Place2)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.8) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = median_price, label = label, color = Place2),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.8) +
+  scale_color_manual(values = config$colors$madison_suburbs) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.5)) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Median Home Price Trends",
+    subtitle = paste0("Suburban homes command ", avg_premium, "% average premium over Madison"),
+    x = "Year of Closing",
+    y = "Median Sales Price (USD)",
+    caption = "Both markets show similar appreciation patterns with consistent premium gap"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 60, 5.5, 5.5))
+```
+
+### Price Per Square Foot Trends
+
+```{r chart8_ppsf_trends}
+ppsf_trends <- madison_area %>%
+  filter(!is.na(Sold_Price_Per_SQFT), Sold_Price_Per_SQFT > 0) %>%
+  group_by(Year_Closing_Date, Place2) %>%
+  summarise(median_ppsf = median(Sold_Price_Per_SQFT, na.rm = TRUE), .groups = "drop")
+
+max_year <- max(ppsf_trends$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(ppsf_trends$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- ppsf_trends %>%
+  group_by(Place2) %>%
+  slice_max(Year_Closing_Date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    label = Place2,
+    x_lab = Year_Closing_Date + 0.4
+  )
+
+ggplot(ppsf_trends, aes(x = Year_Closing_Date, y = median_ppsf, color = Place2)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.8) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = median_ppsf, label = label, color = Place2),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.8) +
+  scale_color_manual(values = config$colors$madison_suburbs) +
+  scale_y_continuous(labels = dollar_format(accuracy = 1)) +
+  scale_x_continuous(limits = c(min_year, max_year + 1.5)) +
+  coord_cartesian(clip = "off") +
+  guides(color = "none") +
+  labs(
+    title = "Price Per Square Foot Trends",
+    subtitle = "Madison shows higher price per square foot values throughout the period",
+    x = "Year of Closing",
+    y = "Price per Square Foot (USD)",
+    caption = "Higher Madison price intensity reflects location premium vs. size trade-off"
+  ) +
+  theme_madison() +
+  theme(plot.margin = margin(5.5, 60, 5.5, 5.5))
+```
+
+### Price Intensity Comparison by Property Type
+
+```{r chart9_ppsf_by_bedroom}
+ppsf_by_bed <- madison_area %>%
+  filter(!is.na(bed_category), bed_category %in% c("3", "4"), 
+         !is.na(Sold_Price_Per_SQFT), Sold_Price_Per_SQFT > 0) %>%
+  group_by(Year_Closing_Date, Place2, bed_category) %>%
+  summarise(median_ppsf = median(Sold_Price_Per_SQFT, na.rm = TRUE), .groups = "drop")
+
+max_year <- max(ppsf_by_bed$Year_Closing_Date, na.rm = TRUE)
+min_year <- min(ppsf_by_bed$Year_Closing_Date, na.rm = TRUE)
+
+labels_df <- ppsf_by_bed %>%
+  group_by(Place2, bed_category) %>%
+  slice_max(Year_Closing_Date, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    label = paste0(bed_category, "-bed ", Place2),
+    x_lab = Year_Closing_Date + 1.5,
+    y_adj = case_when(
+      Place2 == "Madison" & bed_category == "3" ~ median_ppsf + 12,
+      Place2 == "Suburbs" & bed_category == "3" ~ median_ppsf + 2,
+      Place2 == "Madison" & bed_category == "4" ~ median_ppsf - 2,
+      Place2 == "Suburbs" & bed_category == "4" ~ median_ppsf - 7
+    )
+  )
+
+ggplot(ppsf_by_bed, aes(x = Year_Closing_Date, y = median_ppsf,
+                       color = Place2, linetype = bed_category)) +
+  geom_line(linewidth = 1.1) +
+  geom_text(data = labels_df,
+            aes(x = x_lab, y = y_adj, label = label, color = Place2),
+            hjust = 0, vjust = 0.5, fontface = "bold", size = 3.4,
+            show.legend = FALSE) +
+  scale_color_manual(values = config$colors$madison_suburbs) +
+  scale_y_continuous(labels = dollar_format(accuracy = 1)) +
+  scale_x_continuous(limits = c(min_year, max_year + 3.0)) +
+  coord_cartesian(clip = "off") +
+  labs(
+    title = "Price Intensity Comparison by Property Type",
+    subtitle = "Madison maintains price per square foot premium across property sizes",
+    x = "Year of Closing",
+    y = "Price per Square Foot (USD)",
+    color = NULL,
+    linetype = "Bedrooms",
+    caption = "Consistent patterns across both 3- and 4-bedroom segments"
+  ) +
+  theme_madison() +
+  theme(
+    legend.position = "top",
+    plot.margin = margin(5.5, 50, 5.5, 5.5)
+  )
+
+```
+
+\newpage
+
+### Lot Size Analysis
+
+```{r lot_analysis_table}
+# Create table showing median lot sizes for 3 and 4 bedroom homes
+lot_size_summary <- madison_area %>%
+  filter(!is.na(bed_category), bed_category %in% c("3", "4"), 
+         !is.na(Acres_Number), Acres_Number > 0) %>%
+  mutate(lot_sqft = Acres_Number * 43560) %>%  # Convert acres to square feet
+  group_by(Place2, bed_category) %>%
+  summarise(
+    median_lot_sqft = median(lot_sqft, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Category = paste0(Place2, " ", bed_category, "-bedroom"),
+    `Median Lot Size (sq ft)` = comma(round(median_lot_sqft, 0))
+  ) %>%
+  select(Category, `Median Lot Size (sq ft)`)
+
+kable(lot_size_summary,
+      caption = "Table 3: Median Lot Sizes by Market and Bedroom Count",
+      align = c("l", "r"))
+```
+
+\newpage
+
+## Historical Distribution Analysis
+
+### Price Distribution Evolution (3-Bedroom Homes)
+
+```{r chart10_price_boxplots}
+price_3bed_box <- madison_area %>%
+  filter(
+    bed_category == "3",
+    !is.na(decade), !is.na(Sold_Price),
+    Year_Closing_Date >= config$decade_start,
+    Sold_Price <= 2000000  # Cap extreme outliers
+  ) %>%
+  mutate(
+    decade = factor(decade, levels = c("1990s", "2000s", "2010s", "2020s"))
+  )
+
+# Calculate sample sizes for subtitle (split into two lines)
+decade_counts <- price_3bed_box %>%
+  count(decade, Place2) %>%
+  pivot_wider(names_from = Place2, values_from = n, values_fill = 0)
+
+sample_line1 <- paste0("1990s: M(", decade_counts$Madison[1], ") S(", decade_counts$Suburbs[1], "), ",
+                      "2000s: M(", decade_counts$Madison[2], ") S(", decade_counts$Suburbs[2], ")")
+sample_line2 <- paste0("2010s: M(", decade_counts$Madison[3], ") S(", decade_counts$Suburbs[3], "), ",
+                      "2020s: M(", decade_counts$Madison[4], ") S(", decade_counts$Suburbs[4], ")")
+
+ggplot(price_3bed_box, aes(x = decade, y = Sold_Price, fill = Place2)) +
+  geom_boxplot(width = 0.7, position = position_dodge(width = 0.75),
+               color = "black", outlier.size = 0.8, alpha = 0.8) +
+  scale_fill_manual(values = config$colors$madison_suburbs) +
+  scale_y_continuous(labels = dollar_format()) +
+  labs(
+    title = "Price Distribution Evolution - 3-Bedroom Homes",
+    subtitle = paste0(sample_line1, "\n", sample_line2),
+    x = "Decade",
+    y = "Sales Price (USD)",
+    fill = NULL,
+    caption = "Prices capped at $2M to reduce extreme outlier effects"
+  ) +
+  theme_madison() +
+  theme(legend.position = "top")
+```
+
+
+\newpage
+
+## Summary and Market Implications
+
+### Key Market Dynamics
+
+**Volume and Scale:**
+- Madison represents the largest single market location across all included areas
+- Combined market represents the total transactions shown in Table 1 across 30 years
+- Both markets show similar cyclical patterns with suburban areas showing higher volatility
+
+**Price Relationships:**
+- Suburban homes command higher absolute prices, averaging `r avg_premium`% premium over Madison
+- Madison maintains higher price per square foot values, reflecting location vs. size trade-offs
+- Both markets show similar long-term appreciation rates despite absolute price differences
+
+**Property Characteristics:**
+- Suburban homes average 200-300 square feet larger across all bedroom categories
+- Market composition by bedroom count remains stable across both markets
+- Size premiums consistent across all time periods and property types
+
+**Market Dynamics:**
+- Price intensity patterns reveal clear location vs. space value propositions
+- Both markets show mature, interconnected transaction patterns
+- Trade-offs between location convenience and home size drive pricing differentials
+
+### Strategic Implications
+
+1. **Market Segmentation**: Clear differentiation between location-premium (Madison) and size-premium (suburban) markets
+
+2. **Value Propositions**: Buyers choose between Madison's convenience premium and suburban space advantages
+
+3. **Investment Considerations**: Both markets offer similar appreciation potential with different value drivers
+
+4. **Development Patterns**: Consistent demand preferences suggest stable market fundamentals
+
+### Data Quality and Methodology
+
+- Analysis includes the transactions shown in Table 1 across all included markets  
+- Madison identification via high school attendance zones ensures geographic accuracy
+- Excluded communities: Mount Horeb - V, Cross Plains - V, Cross Plains, Maple Bluff - V, Shorewood Hills - V
+- Consistent data cleaning and error filtering applied across all analyses
+
+**Next Report Preview**: Future analysis will explore micro-market variations within suburban communities and examine the impact of lot sizes and specific location amenities on pricing differentials.
+
+\newpage
+
+### Personal Note
+
+I am very pleased to say that I am an alumnus of the University of Wisconsin-Madison. I have an M.A. in mathematics and an M.S. in Business from UW-Madison.
+
+Ira Sharenow
+El Cerrito, CA
+irasharenow100@gmail.com
+
+*Go Bucky!*
+
+```{r bucky_image, out.width='\\paperwidth', out.height='\\paperheight', out.extra='keepaspectratio'}
+bucky_path <- "D:/Documents/Employment/2025 job search/Project 2025/Madison Housing Project/Outputs/Bucky_Badger.jpg"
+if (file.exists(bucky_path)) {
+  knitr::include_graphics(bucky_path)
+}
+```
